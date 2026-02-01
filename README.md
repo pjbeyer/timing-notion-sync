@@ -52,7 +52,6 @@ Automatically sync your daily time tracking data from Timing.app to a Notion dat
    TIMING_API_TOKEN=your_timing_token_here
    NOTION_API_TOKEN=your_notion_token_here  
    NOTION_DATABASE_ID=your_database_id_here
-   USERNAME=your_macos_username_here
    ```
 
 5. **Set up your Notion database**
