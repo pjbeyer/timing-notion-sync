@@ -5,7 +5,8 @@
 # Configure your 1Password references in .env.op:
 #   TIMING_API_TOKEN="op://Vault/Item/field"
 #   NOTION_API_TOKEN="op://Vault/Item/field"
-#   NOTION_DATABASE_ID="your-database-id"
+#
+# Note: NOTION_DATABASE_ID goes in .env (not a secret)
 
 set -e
 
@@ -23,8 +24,8 @@ fi
 
 source "$CONFIG_FILE"
 
-if [ -z "$TIMING_API_TOKEN" ] || [ -z "$NOTION_API_TOKEN" ] || [ -z "$NOTION_DATABASE_ID" ]; then
-    echo "ERROR: TIMING_API_TOKEN, NOTION_API_TOKEN, and NOTION_DATABASE_ID must be set in $CONFIG_FILE"
+if [ -z "$TIMING_API_TOKEN" ] || [ -z "$NOTION_API_TOKEN" ]; then
+    echo "ERROR: TIMING_API_TOKEN and NOTION_API_TOKEN must be set in $CONFIG_FILE"
     exit 1
 fi
 
@@ -41,7 +42,6 @@ security add-generic-password -a "$USER" -s "timing-notion-sync-timing-token" -w
 security add-generic-password -a "$USER" -s "timing-notion-sync-notion-token" -w "$NOTION_TOKEN" -U 2>/dev/null || \
 security add-generic-password -a "$USER" -s "timing-notion-sync-notion-token" -w "$NOTION_TOKEN"
 
-security add-generic-password -a "$USER" -s "timing-notion-sync-notion-db" -w "$NOTION_DATABASE_ID" -U 2>/dev/null || \
-security add-generic-password -a "$USER" -s "timing-notion-sync-notion-db" -w "$NOTION_DATABASE_ID"
-
-echo "Done! Secrets refreshed in Keychain."
+echo "Done! API tokens refreshed in Keychain."
+echo ""
+echo "Reminder: NOTION_DATABASE_ID and sync options go in .env (not Keychain)"
