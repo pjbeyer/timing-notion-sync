@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 """
-Sync Timing.app data to Notion database
-Runs to sync today's project time tracking data only
+Sync Timing.app and ScreenTime data to Notion database
+Enhanced version with entry-level details and macOS ScreenTime integration
+
+Sync Modes:
+- PROJECT_TOTALS: Aggregate by project (original behavior)
+- ENTRY_LEVEL: Individual time entries with details
+- SCREENTIME: macOS ScreenTime app usage data
 """
 
 import requests
 from datetime import datetime
 import os
 import sys
+import sqlite3
 from dotenv import load_dotenv
 import traceback
 import json
 from collections import deque
 from pathlib import Path
+from typing import Dict, List, Optional, Any
 
 # Load environment variables from .env file
 load_dotenv()
@@ -21,6 +28,14 @@ load_dotenv()
 TIMING_API_TOKEN = os.environ.get("TIMING_API_TOKEN")
 NOTION_API_TOKEN = os.environ.get("NOTION_API_TOKEN")
 NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID")
+
+# Enhanced sync configuration
+SYNC_ENTRIES = os.environ.get("SYNC_ENTRIES", "false").lower() == "true"
+SYNC_SCREENTIME = os.environ.get("SYNC_SCREENTIME", "false").lower() == "true"
+SCREENTIME_TOP_APPS = int(os.environ.get("SCREENTIME_TOP_APPS", "5"))
+
+# ScreenTime database location
+SCREENTIME_DB = Path.home() / "Library/Application Support/Knowledge/knowledgeC.db"
 
 # Error logging configuration
 LOG_DIR = Path(__file__).parent / "logs"
@@ -108,49 +123,27 @@ def seconds_to_duration_string(seconds):
     return f"{hours}:{minutes:02d}:{secs:02d}"
 
 
-def get_project_names():
-    """Fetch all projects to map IDs to names"""
-    url = "https://web.timingapp.com/api/v1/projects"
-    headers = {
-        "Authorization": f"Bearer {TIMING_API_TOKEN}",
-        "Accept": "application/json",
-    }
-
-    try:
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-
-        # Create a mapping of project ID to name
-        project_map = {}
-        if "data" in data:
-            for project in data["data"]:
-                project_id = project.get("self", "").split("/")[-1]
-                project_name = project.get("title", "Unknown")
-                if project_id:
-                    project_map[project_id] = project_name
-
-        return project_map
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Failed to fetch Timing projects: {str(e)}"
-        handle_error(
-            error_msg,
-            f"API URL: {url}\nStatus Code: {response.status_code if 'response' in locals() else 'N/A'}",
-        )
-        raise
+# =============================================================================
+# TIMING API - Enhanced with Entry-Level Data
+# =============================================================================
 
 
-def get_timing_data():
-    """Fetch today's data from Timing API"""
-    today = datetime.now().strftime("%Y-%m-%d")
+def get_timing_entries(date: str) -> List[Dict]:
+    """
+    Fetch individual time entries from Timing API.
+    Uses /time-entries endpoint for granular data.
+
+    Args:
+        date: Date in YYYY-MM-DD format
+
+    Returns:
+        List of time entry objects with full details
+    """
     tz_offset = get_local_timezone_offset()
+    start_time = f"{date}T00:00:00{tz_offset}"
+    end_time = f"{date}T23:59:59{tz_offset}"
 
-    start_time = f"{today}T00:00:00{tz_offset}"
-    end_time = f"{today}T23:59:59{tz_offset}"
-
-    print(f"Fetching data for {today} ({tz_offset})")
-
-    url = "https://web.timingapp.com/api/v1/report"
+    url = "https://web.timingapp.com/api/v1/time-entries"
     headers = {
         "Authorization": f"Bearer {TIMING_API_TOKEN}",
         "Accept": "application/json",
@@ -158,25 +151,227 @@ def get_timing_data():
     params = {
         "start_date_min": start_time,
         "start_date_max": end_time,
-        "project_grouping_level": -1,  # All projects at any depth
-        "include_project_data": "true",  # Include full project info
+        "include_project_data": "true",
     }
 
     try:
         response = requests.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
         data = response.json()
-        print(f"API returned {len(data.get('data', []))} entries for {today}")
-
-        return data
+        return data.get("data", [])
     except requests.exceptions.RequestException as e:
-        error_msg = f"Failed to fetch Timing data: {str(e)}"
-        details = f"API URL: {url}\nDate Range: {start_time} to {end_time}\nStatus Code: {response.status_code if 'response' in locals() else 'N/A'}"
-        handle_error(error_msg, details)
+        error_msg = f"Failed to fetch Timing entries: {str(e)}"
+        handle_error(error_msg)
         raise
 
 
-def find_notion_page(date, project):
+def process_timing_entries(entries: List[Dict]) -> Dict[str, Any]:
+    """
+    Process timing entries into project totals and entry details.
+
+    Returns dict with:
+    - project_totals: Dict of project -> {duration, entries}
+    - entry_details: List of individual entries with metadata
+    - total_seconds: Total time tracked
+    """
+    project_totals = {}
+    entry_details = []
+    total_seconds = 0
+
+    for entry in entries:
+        duration = entry.get("duration", 0)
+        if duration <= 0:
+            continue
+
+        total_seconds += duration
+
+        # Extract project info
+        project_data = entry.get("project")
+        if project_data is None:
+            project_name = "Uncategorized"
+            project_path = "Uncategorized"
+        elif isinstance(project_data, dict):
+            title_chain = project_data.get("title_chain", [])
+            if title_chain:
+                project_path = " > ".join(title_chain)
+                project_name = title_chain[-1]  # Leaf project name
+            else:
+                project_name = project_data.get("title", "Unknown")
+                project_path = project_name
+        else:
+            project_name = str(project_data)
+            project_path = project_name
+
+        # Build entry detail
+        entry_detail = {
+            "title": entry.get("title", ""),
+            "notes": entry.get("notes", ""),
+            "duration_seconds": duration,
+            "duration_hours": round(duration / 3600, 3),
+            "start_time": entry.get("start_date", ""),
+            "end_time": entry.get("end_date", ""),
+            "project_name": project_name,
+            "project_path": project_path,
+            "is_running": entry.get("is_running", False),
+        }
+        entry_details.append(entry_detail)
+
+        # Aggregate by project path (full hierarchy)
+        if project_path not in project_totals:
+            project_totals[project_path] = {
+                "project_name": project_name,
+                "total_duration": 0,
+                "entry_count": 0,
+                "entries": [],
+            }
+        project_totals[project_path]["total_duration"] += duration
+        project_totals[project_path]["entry_count"] += 1
+        project_totals[project_path]["entries"].append(entry_detail)
+
+    return {
+        "project_totals": project_totals,
+        "entry_details": entry_details,
+        "total_seconds": total_seconds,
+    }
+
+
+# =============================================================================
+# SCREENTIME - macOS ScreenTime SQLite Integration
+# =============================================================================
+
+
+def get_screentime_data(date: str) -> Optional[Dict[str, Any]]:
+    """
+    Query macOS ScreenTime database for app usage data.
+
+    Requires Full Disk Access permission for the running process.
+
+    Args:
+        date: Date in YYYY-MM-DD format
+
+    Returns:
+        Dict with app usage data, or None if unavailable
+    """
+    if not SCREENTIME_DB.exists():
+        print(f"ScreenTime database not found at {SCREENTIME_DB}")
+        return None
+
+    try:
+        conn = sqlite3.connect(f"file:{SCREENTIME_DB}?mode=ro", uri=True)
+        cursor = conn.cursor()
+
+        # Query app usage for the specific date
+        # ScreenTime uses Core Data timestamps (seconds since 2001-01-01)
+        query = """
+        SELECT 
+            ZOBJECT.ZVALUESTRING as app_bundle_id,
+            COUNT(*) as event_count,
+            ROUND(SUM(ZOBJECT.ZENDDATE - ZOBJECT.ZSTARTDATE) / 60.0, 1) as duration_minutes,
+            ROUND(SUM(ZOBJECT.ZENDDATE - ZOBJECT.ZSTARTDATE) / 3600.0, 2) as duration_hours
+        FROM ZOBJECT
+        WHERE ZOBJECT.ZSTREAMNAME = '/app/usage'
+        AND date(ZOBJECT.ZSTARTDATE + 978307200, 'unixepoch', 'localtime') = ?
+        GROUP BY ZOBJECT.ZVALUESTRING
+        ORDER BY duration_minutes DESC;
+        """
+
+        cursor.execute(query, (date,))
+        rows = cursor.fetchall()
+
+        # Calculate totals
+        total_events = 0
+        total_minutes = 0
+        apps = []
+
+        for row in rows:
+            bundle_id, events, minutes, hours = row
+            if minutes and minutes > 0:
+                total_events += events
+                total_minutes += minutes
+                apps.append(
+                    {
+                        "bundle_id": bundle_id or "unknown",
+                        "app_name": _bundle_to_app_name(bundle_id),
+                        "event_count": events,
+                        "duration_minutes": minutes,
+                        "duration_hours": hours,
+                    }
+                )
+
+        conn.close()
+
+        # Get top N apps for summary
+        top_apps = apps[:SCREENTIME_TOP_APPS]
+        top_apps_summary = ", ".join(
+            f"{app['app_name']} ({app['duration_hours']}h)" for app in top_apps
+        )
+
+        return {
+            "total_events": total_events,
+            "total_minutes": round(total_minutes, 1),
+            "total_hours": round(total_minutes / 60, 2),
+            "app_count": len(apps),
+            "apps": apps,
+            "top_apps": top_apps,
+            "top_apps_summary": top_apps_summary,
+        }
+
+    except sqlite3.OperationalError as e:
+        if "authorization denied" in str(e).lower():
+            print("ScreenTime access denied - Full Disk Access required")
+            print(
+                "Grant access: System Settings → Privacy & Security → Full Disk Access"
+            )
+        else:
+            print(f"ScreenTime database error: {e}")
+        return None
+    except Exception as e:
+        print(f"Failed to query ScreenTime: {e}")
+        return None
+
+
+def _bundle_to_app_name(bundle_id: str) -> str:
+    """Convert bundle ID to human-readable app name."""
+    if not bundle_id:
+        return "Unknown"
+
+    # Common bundle ID mappings
+    mappings = {
+        "com.apple.Safari": "Safari",
+        "com.apple.mail": "Mail",
+        "com.apple.MobileSMS": "Messages",
+        "com.apple.finder": "Finder",
+        "com.apple.Terminal": "Terminal",
+        "com.googlecode.iterm2": "iTerm",
+        "com.microsoft.VSCode": "VS Code",
+        "com.tinyspeck.slackmacgap": "Slack",
+        "com.apple.Notes": "Notes",
+        "com.apple.iCal": "Calendar",
+        "us.zoom.xos": "Zoom",
+        "com.google.Chrome": "Chrome",
+        "com.apple.Music": "Music",
+        "notion.id": "Notion",
+        "com.linear": "Linear",
+        "com.1password.1password": "1Password",
+        "com.timingapp.timing": "Timing",
+    }
+
+    if bundle_id in mappings:
+        return mappings[bundle_id]
+
+    # Extract app name from bundle ID
+    parts = bundle_id.split(".")
+    if len(parts) >= 3:
+        return parts[-1].replace("-", " ").title()
+    return bundle_id
+
+
+# =============================================================================
+# NOTION API - Enhanced Properties
+# =============================================================================
+
+
+def find_notion_page(date: str, project: str) -> Optional[str]:
     """Find existing Notion page with matching date and project"""
     url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
     headers = {
@@ -201,13 +396,24 @@ def find_notion_page(date, project):
         return results[0]["id"] if results else None
     except requests.exceptions.RequestException as e:
         error_msg = f"Failed to query Notion database: {str(e)}"
-        details = f"Database ID: {NOTION_DATABASE_ID}\nDate: {date}\nProject: {project}\nStatus Code: {response.status_code if 'response' in locals() else 'N/A'}"
-        handle_error(error_msg, details)
+        handle_error(error_msg)
         raise
 
 
-def update_or_create_notion_page(page_id, date, duration_seconds, project):
-    """Update existing page or create new one in Notion"""
+def update_or_create_notion_page(
+    page_id: Optional[str],
+    date: str,
+    duration_seconds: float,
+    project: str,
+    entry_count: int = 0,
+    top_entries: Optional[List[str]] = None,
+    screentime_data: Optional[Dict] = None,
+) -> bool:
+    """
+    Update existing page or create new one in Notion.
+
+    Enhanced with optional entry details and ScreenTime data.
+    """
     headers = {
         "Authorization": f"Bearer {NOTION_API_TOKEN}",
         "Notion-Version": "2022-06-28",
@@ -232,6 +438,27 @@ def update_or_create_notion_page(page_id, date, duration_seconds, project):
         },
     }
 
+    # Add entry count if available (requires "Entry Count" number property in Notion)
+    if entry_count > 0:
+        properties["Entry Count"] = {"number": entry_count}
+
+    # Add top entries summary if available (requires "Top Entries" rich_text property)
+    if top_entries:
+        entries_text = " | ".join(top_entries[:3])  # Top 3 entries
+        if len(entries_text) > 2000:
+            entries_text = entries_text[:1997] + "..."
+        properties["Top Entries"] = {"rich_text": [{"text": {"content": entries_text}}]}
+
+    # Add ScreenTime data if available (requires corresponding properties)
+    if screentime_data:
+        properties["Active Hours"] = {"number": screentime_data.get("total_hours", 0)}
+        properties["Screen Events"] = {"number": screentime_data.get("total_events", 0)}
+        if screentime_data.get("top_apps_summary"):
+            summary = screentime_data["top_apps_summary"]
+            if len(summary) > 2000:
+                summary = summary[:1997] + "..."
+            properties["Top Apps"] = {"rich_text": [{"text": {"content": summary}}]}
+
     if page_id:
         # Update existing page
         url = f"https://api.notion.com/v1/pages/{page_id}"
@@ -243,6 +470,7 @@ def update_or_create_notion_page(page_id, date, duration_seconds, project):
         data = {"parent": {"database_id": NOTION_DATABASE_ID}, "properties": properties}
         method = "POST"
 
+    response = None
     try:
         response = requests.request(method, url, headers=headers, json=data, timeout=30)
         response.raise_for_status()
@@ -251,14 +479,68 @@ def update_or_create_notion_page(page_id, date, duration_seconds, project):
         error_msg = (
             f"Failed to {'update' if page_id else 'create'} Notion page: {str(e)}"
         )
-        details = f"Project: {project}\nDate: {date}\nDuration: {duration_string}\nResponse: {response.text if 'response' in locals() else 'No response'}"
-        handle_error(error_msg, details)
+        if response is not None and response.status_code == 400:
+            response_json = response.json()
+            if "validation_error" in str(response_json):
+                print("Note: Some enhanced properties not available in Notion database")
+                return _sync_basic_properties(page_id, date, duration_seconds, project)
+        handle_error(error_msg)
         raise
 
 
+def _sync_basic_properties(
+    page_id: Optional[str],
+    date: str,
+    duration_seconds: float,
+    project: str,
+) -> bool:
+    """Fallback to basic properties only (backward compatible)."""
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_TOKEN}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+
+    duration_string = seconds_to_duration_string(duration_seconds)
+    duration_hours = round(duration_seconds / 3600, 3)
+
+    properties = {
+        "Date": {"date": {"start": date}},
+        "Project": {"title": [{"text": {"content": project}}]},
+        "Duration": {"rich_text": [{"text": {"content": duration_string}}]},
+        "Hours": {"number": duration_hours},
+        "Last Sync": {
+            "date": {
+                "start": datetime.now().strftime(
+                    f"%Y-%m-%dT%H:%M:%S{get_local_timezone_offset()}"
+                )
+            }
+        },
+    }
+
+    if page_id:
+        url = f"https://api.notion.com/v1/pages/{page_id}"
+        data = {"properties": properties}
+        method = "PATCH"
+    else:
+        url = "https://api.notion.com/v1/pages"
+        data = {"parent": {"database_id": NOTION_DATABASE_ID}, "properties": properties}
+        method = "POST"
+
+    response = requests.request(method, url, headers=headers, json=data, timeout=30)
+    response.raise_for_status()
+    return True
+
+
+# =============================================================================
+# MAIN SYNC LOGIC
+# =============================================================================
+
+
 def main():
-    """Main sync function"""
+    """Main sync function with enhanced data collection"""
     print(f"Starting Timing to Notion sync at {datetime.now()}")
+    print(f"Sync modes: entries={SYNC_ENTRIES}, screentime={SYNC_SCREENTIME}")
 
     # Check if user is idle (5 minutes = 300 seconds)
     try:
@@ -271,108 +553,112 @@ def main():
         if idle_time > 300:
             print(f"Computer idle for {idle_time:.0f} seconds, skipping sync")
             sys.exit(0)
-    except:
+    except Exception:
         # If we can't check idle time, continue with sync
         pass
 
     try:
-        # Get data from Timing
-        timing_data = get_timing_data()
-        if not timing_data or "data" not in timing_data:
-            error_msg = "No data received from Timing API"
-            handle_error(error_msg)
+        today = datetime.now().strftime("%Y-%m-%d")
+        tz_offset = get_local_timezone_offset()
+        print(f"Fetching data for {today} ({tz_offset})")
+
+        # Fetch timing entries
+        entries = get_timing_entries(today)
+        print(f"API returned {len(entries)} time entries for {today}")
+
+        if not entries:
+            print("No time entries found for today")
             return
 
-        today = datetime.now().strftime("%Y-%m-%d")
+        # Process entries
+        processed = process_timing_entries(entries)
+        project_totals = processed["project_totals"]
+        entry_details = processed["entry_details"]
+        total_seconds = processed["total_seconds"]
+
+        # Fetch ScreenTime data if enabled
+        screentime_data = None
+        if SYNC_SCREENTIME:
+            print("Fetching ScreenTime data...")
+            screentime_data = get_screentime_data(today)
+            if screentime_data:
+                print(
+                    f"ScreenTime: {screentime_data['total_hours']}h active, {screentime_data['app_count']} apps"
+                )
+            else:
+                print("ScreenTime data unavailable (check Full Disk Access)")
+
+        # Print entry details if enabled
+        if SYNC_ENTRIES:
+            print(f"\nIndividual entries ({len(entry_details)}):")
+            for entry in entry_details:
+                title = entry["title"] or "(no title)"
+                print(
+                    f"  {entry['project_path']}: {title} - {seconds_to_duration_string(entry['duration_seconds'])}"
+                )
+
+        print(f"\nGrouped by project ({len(project_totals)}):")
         updated_count = 0
         created_count = 0
 
-        # Group entries by project and sum durations
-        project_totals = {}
-
-        for entry in timing_data["data"]:
-            # Handle project - get the full project path to avoid naming conflicts
-            project_data = entry.get("project")
-            if project_data is None:
-                project = "Uncategorized"
-                project_id = "uncategorized"
-            elif isinstance(project_data, dict):
-                # Use the full title_chain to create unique project names
-                title_chain = project_data.get("title_chain", [])
-                if title_chain:
-                    # Join the full path with " > " separator for clarity
-                    project = " > ".join(title_chain)
-                else:
-                    project = project_data.get("title", "Unknown")
-                project_id = project_data.get("self", "unknown")
-            elif isinstance(project_data, str):
-                project = project_data
-                project_id = project_data
-            else:
-                project = "Uncategorized"
-                project_id = "uncategorized"
-
-            duration = entry.get("duration", 0)
-
-            # Skip entries with no duration
-            if duration < 0:
-                continue
-
-            # Group by project ID and sum durations
-            if project_id not in project_totals:
-                project_totals[project_id] = {
-                    "project_name": project,
-                    "total_duration": 0,
-                }
-            project_totals[project_id]["total_duration"] += duration
-
-            # Print individual entries for debugging
-            entry_title = entry.get("title", "No title")
-            print(
-                f"  Entry: {project} - {entry_title} - {seconds_to_duration_string(duration)}"
-            )
-
-        print(f"\nGrouped by project:")
-
-        # Process each grouped project
-        for project_id, project_info in project_totals.items():
-            project_name = project_info["project_name"]
+        # Process each project
+        for project_path, project_info in project_totals.items():
             total_duration = project_info["total_duration"]
+            entry_count = project_info["entry_count"]
 
-            print(f"  {project_name}: {seconds_to_duration_string(total_duration)}")
+            # Get top entry titles for summary
+            top_entries = []
+            for entry in sorted(
+                project_info["entries"],
+                key=lambda x: x["duration_seconds"],
+                reverse=True,
+            )[:3]:
+                if entry["title"]:
+                    top_entries.append(
+                        f"{entry['title']} ({seconds_to_duration_string(entry['duration_seconds'])})"
+                    )
+
+            print(
+                f"  {project_path}: {seconds_to_duration_string(total_duration)} ({entry_count} entries)"
+            )
 
             try:
                 # Check if entry exists
-                page_id = find_notion_page(today, project_name)
+                page_id = find_notion_page(today, project_path)
 
-                # Update or create
+                # Update or create with enhanced data
                 update_or_create_notion_page(
-                    page_id, today, total_duration, project_name
+                    page_id=page_id,
+                    date=today,
+                    duration_seconds=total_duration,
+                    project=project_path,
+                    entry_count=entry_count,
+                    top_entries=top_entries if SYNC_ENTRIES else None,
+                    screentime_data=screentime_data,  # Same for all projects
                 )
 
                 if page_id:
                     updated_count += 1
-                    print(
-                        f"Updated: {project_name} - {seconds_to_duration_string(total_duration)}"
-                    )
+                    print(f"Updated: {project_path}")
                 else:
                     created_count += 1
-                    print(
-                        f"Created: {project_name} - {seconds_to_duration_string(total_duration)}"
-                    )
+                    print(f"Created: {project_path}")
             except Exception as e:
-                # Log individual project failure but continue with others
-                print(f"Failed to sync project {project_name}: {e}")
+                print(f"Failed to sync project {project_path}: {e}")
                 continue
 
-        # Calculate total time
-        total_seconds = sum(info["total_duration"] for info in project_totals.values())
+        # Summary
         total_hours = total_seconds / 3600
-
         print(f"\nSync complete: {updated_count} updated, {created_count} created")
         print(
             f"Total time tracked today: {seconds_to_duration_string(total_seconds)} ({total_hours:.2f} hours)"
         )
+
+        if screentime_data:
+            print(
+                f"ScreenTime active: {screentime_data['total_hours']}h ({screentime_data['total_events']} events)"
+            )
+            print(f"Top apps: {screentime_data['top_apps_summary']}")
 
     except Exception as e:
         error_msg = f"Sync failed: {str(e)}"

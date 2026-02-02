@@ -1,13 +1,19 @@
 # ⏱️ Timing to Notion Sync
 
-Automatically sync your daily time tracking data from Timing.app to a Notion database for visualization and reporting. Perfect for creating daily/weekly/monthly time tracking charts and reports in Notion. 
+Automatically sync your daily time tracking data from Timing.app to a Notion database for visualization and reporting. Perfect for creating daily/weekly/monthly time tracking charts and reports in Notion.
 
 ## ✨ Features
 
 - 🔄 Automatic sync every 15 minutes (at :00, :15, :30, :45)
 - 📊 Groups time by project with full hierarchy support
 - 🕐 Timezone-aware date handling
-- 🔐 Secure token storage via environment variables
+- 🔐 Secure token storage via environment variables or macOS Keychain
+
+### Enhanced Features (Optional)
+
+- 📝 **Entry-level details** - Sync individual time entries with titles and notes
+- 📱 **ScreenTime integration** - Capture macOS app usage data alongside Timing
+- 📈 **Extended metrics** - Entry counts, top activities, active hours
 
 ## 📋 Prerequisites
 
@@ -93,6 +99,65 @@ security add-generic-password -a "$USER" -s "timing-notion-sync-notion-token" -w
 
 When Keychain credentials are present, `run-sync.sh` uses them automatically instead of the `.env` file.
 
+## 🚀 Enhanced Sync Features
+
+The sync script supports optional enhanced data collection beyond basic project totals.
+
+### Entry-Level Details
+
+Capture individual time entries with titles and notes:
+
+```bash
+# In .env file
+SYNC_ENTRIES=true
+```
+
+**Required Notion properties:**
+- `Entry Count` (Number) - Number of time entries for the project
+- `Top Entries` (Text) - Summary of top activities by duration
+
+### ScreenTime Integration
+
+Capture macOS ScreenTime app usage data:
+
+```bash
+# In .env file
+SYNC_SCREENTIME=true
+SCREENTIME_TOP_APPS=5  # Number of top apps to include
+```
+
+**Required Notion properties:**
+- `Active Hours` (Number) - Total active screen time
+- `Screen Events` (Number) - Number of app usage events
+- `Top Apps` (Text) - Summary of most-used apps
+
+**Setup Requirements:**
+1. Grant **Full Disk Access** to your terminal app or launchd agent
+2. System Settings → Privacy & Security → Full Disk Access
+3. Add Terminal.app (or iTerm, etc.)
+
+If Full Disk Access is not granted, ScreenTime sync will be skipped gracefully.
+
+### Notion Database Schema
+
+**Basic properties (required):**
+| Property | Type | Description |
+|----------|------|-------------|
+| Project | Title | Project name with hierarchy |
+| Date | Date | Entry date |
+| Duration | Text | H:MM:SS format |
+| Hours | Number | Decimal hours |
+| Last Sync | Date | Sync timestamp |
+
+**Enhanced properties (optional):**
+| Property | Type | Description |
+|----------|------|-------------|
+| Entry Count | Number | Time entries per project |
+| Top Entries | Text | Top activities summary |
+| Active Hours | Number | ScreenTime active hours |
+| Screen Events | Number | App usage event count |
+| Top Apps | Text | Most-used apps summary |
+
 ## 🔧 Configuration
 
 ### Creating Charts in Notion
@@ -159,8 +224,19 @@ pip3 install --user --break-system-packages requests python-dotenv
 
 **No data syncing**
 - Verify Timing.app has data for today
-- Check timezone settings (script uses PDT)
+- Check timezone settings (script uses local timezone)
 - Ensure API tokens are valid
+
+**ScreenTime "authorization denied" error**
+- Full Disk Access not enabled for your terminal
+- System Settings → Privacy & Security → Full Disk Access
+- Add Terminal.app, iTerm, or your preferred terminal
+- Note: launchd agents may need separate Full Disk Access configuration
+
+**Enhanced properties not syncing**
+- Notion database missing required properties
+- Add the optional properties listed in the Enhanced Sync section
+- Script falls back to basic sync if properties don't exist
 
 ### Error Handling
 When sync fails:
@@ -185,14 +261,16 @@ python3 timing-notion-sync.py
 
 ```
 timing-notion-sync/
-├── timing-notion-sync.py         # Main sync script
-├── com.timing-notion-sync.plist  # launchd configuration
-├── install.sh                    # Installation script
-├── uninstall.sh                  # Uninstall script
-├── .env.example                  # Template for API tokens
-├── .gitignore                    # Excludes sensitive files
-├── logs/                         # Error logs (auto-created)
-└── README.md                     # This file
+├── timing-notion-sync.py                # Main sync script (Timing + ScreenTime)
+├── run-sync.sh                          # Wrapper for Keychain credentials
+├── refresh-secrets.sh                   # 1Password → Keychain sync
+├── com.timing-notion-sync.plist.template # launchd template
+├── install.sh                           # Installation script
+├── uninstall.sh                         # Uninstall script
+├── .env.example                         # Configuration template
+├── .gitignore                           # Excludes sensitive files
+├── logs/                                # Error logs (auto-created)
+└── README.md                            # This file
 ```
 
 ## 🤝 Contributing
