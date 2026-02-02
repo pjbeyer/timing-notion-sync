@@ -408,7 +408,7 @@ def update_or_create_notion_page(
     entry_count: int = 0,
     top_entries: Optional[List[str]] = None,
     screentime_data: Optional[Dict] = None,
-) -> bool:
+) -> Optional[str]:
     """
     Update existing page or create new one in Notion.
 
@@ -474,7 +474,8 @@ def update_or_create_notion_page(
     try:
         response = requests.request(method, url, headers=headers, json=data, timeout=30)
         response.raise_for_status()
-        return True
+        result = response.json()
+        return page_id if page_id else result.get("id")
     except requests.exceptions.RequestException as e:
         error_msg = (
             f"Failed to {'update' if page_id else 'create'} Notion page: {str(e)}"
@@ -488,12 +489,105 @@ def update_or_create_notion_page(
         raise
 
 
+def update_page_content_with_entries(page_id: str, entries: List[Dict]) -> bool:
+    """Replace page content with formatted entry details as bullet list blocks."""
+    if not entries:
+        return True
+
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_TOKEN}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+
+    blocks_url = f"https://api.notion.com/v1/blocks/{page_id}/children"
+
+    try:
+        response = requests.get(blocks_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        for block in response.json().get("results", []):
+            requests.delete(
+                f"https://api.notion.com/v1/blocks/{block['id']}",
+                headers=headers,
+                timeout=30,
+            )
+    except Exception:
+        pass
+
+    children = [
+        {
+            "object": "block",
+            "type": "heading_3",
+            "heading_3": {
+                "rich_text": [{"type": "text", "text": {"content": "Time Entries"}}]
+            },
+        }
+    ]
+
+    sorted_entries = sorted(entries, key=lambda x: x["duration_seconds"], reverse=True)
+
+    for entry in sorted_entries:
+        title = entry.get("title") or "(no title)"
+        duration = seconds_to_duration_string(entry["duration_seconds"])
+        notes = entry.get("notes", "")
+        start = entry.get("start_time", "")
+
+        time_str = ""
+        if start:
+            try:
+                dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                time_str = dt.astimezone().strftime("%H:%M")
+            except Exception:
+                pass
+
+        bullet_text = f"{title} ({duration})"
+        if time_str:
+            bullet_text += f" @{time_str}"
+
+        bullet_block = {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [{"type": "text", "text": {"content": bullet_text}}]
+            },
+        }
+
+        if notes:
+            bullet_block["bulleted_list_item"]["children"] = [
+                {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [
+                            {
+                                "type": "text",
+                                "text": {"content": notes},
+                                "annotations": {"italic": True, "color": "gray"},
+                            }
+                        ]
+                    },
+                }
+            ]
+
+        children.append(bullet_block)
+
+    try:
+        response = requests.patch(
+            blocks_url, headers=headers, json={"children": children}, timeout=30
+        )
+        response.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to update page content: {e}")
+        return False
+
+
 def _sync_basic_properties(
     page_id: Optional[str],
     date: str,
     duration_seconds: float,
     project: str,
-) -> bool:
+) -> Optional[str]:
     """Fallback to basic properties only (backward compatible)."""
     headers = {
         "Authorization": f"Bearer {NOTION_API_TOKEN}",
@@ -529,7 +623,8 @@ def _sync_basic_properties(
 
     response = requests.request(method, url, headers=headers, json=data, timeout=30)
     response.raise_for_status()
-    return True
+    result = response.json()
+    return page_id if page_id else result.get("id")
 
 
 # =============================================================================
@@ -623,21 +718,24 @@ def main():
             )
 
             try:
-                # Check if entry exists
-                page_id = find_notion_page(today, project_path)
+                existing_page_id = find_notion_page(today, project_path)
 
-                # Update or create with enhanced data
-                update_or_create_notion_page(
-                    page_id=page_id,
+                result_page_id = update_or_create_notion_page(
+                    page_id=existing_page_id,
                     date=today,
                     duration_seconds=total_duration,
                     project=project_path,
                     entry_count=entry_count,
                     top_entries=top_entries if SYNC_ENTRIES else None,
-                    screentime_data=screentime_data,  # Same for all projects
+                    screentime_data=screentime_data,
                 )
 
-                if page_id:
+                if SYNC_ENTRIES and result_page_id:
+                    update_page_content_with_entries(
+                        result_page_id, project_info["entries"]
+                    )
+
+                if existing_page_id:
                     updated_count += 1
                     print(f"Updated: {project_path}")
                 else:
