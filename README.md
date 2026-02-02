@@ -75,8 +75,23 @@ Automatically sync your daily time tracking data from Timing.app to a Notion dat
    ```bash
    ./install.sh
    ```
-   
-   **Note:** When you see commands in code blocks like above, copy only the command itself (e.g., `./install.sh`), not the ```bash``` markers. Those are just formatting to show it's a terminal command.
+
+### macOS Keychain Integration (Optional)
+
+For enhanced security, store your API tokens in macOS Keychain instead of a `.env` file. This allows the sync to run via launchd without storing credentials in plaintext.
+
+**Initial setup** (requires [1Password CLI](https://developer.1password.com/docs/cli/)):
+```bash
+./refresh-secrets.sh
+```
+
+**Manual setup** (without 1Password):
+```bash
+security add-generic-password -a "$USER" -s "timing-notion-sync-timing-token" -w "YOUR_TIMING_TOKEN"
+security add-generic-password -a "$USER" -s "timing-notion-sync-notion-token" -w "YOUR_NOTION_TOKEN"
+```
+
+When Keychain credentials are present, `run-sync.sh` uses them automatically instead of the `.env` file.
 
 ## 🔧 Configuration
 
