@@ -9,11 +9,11 @@
     <array>
         <string>/usr/bin/env</string>
         <string>python3</string>
-        <string>/Users/{USERNAME}/dev/timing-notion-sync/timing-notion-sync.py</string>
+        <string>{PROJECT_DIR}/timing-notion-sync.py</string>
     </array>
     
     <key>WorkingDirectory</key>
-    <string>/Users/{USERNAME}/dev/timing-notion-sync</string>
+    <string>{PROJECT_DIR}</string>
     
     <key>StartCalendarInterval</key>
     <array>
@@ -39,10 +39,10 @@
     <true/>
     
     <key>StandardOutPath</key>
-    <string>/Users/{USERNAME}/dev/timing-notion-sync/logs/sync.log</string>
+    <string>{PROJECT_DIR}/logs/sync.log</string>
     
     <key>StandardErrorPath</key>
-    <string>/Users/{USERNAME}/dev/timing-notion-sync/logs/sync.log</string>
+    <string>{PROJECT_DIR}/logs/sync.log</string>
     
     <key>EnvironmentVariables</key>
     <dict>
