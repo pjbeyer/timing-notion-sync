@@ -116,6 +116,20 @@ SYNC_ENTRIES=true
 - `Entry Count` (Number) - Number of time entries for the project
 - `Top Entries` (Text) - Summary of top activities by duration
 
+### Custom Fields Propagation
+
+Propagate Timing entry `custom_fields` (device-scoped enrichment markers, e.g. from the Dayflow enrichment pipeline) into each entry's Notion page content:
+
+```bash
+# In .env — only effective when SYNC_ENTRIES=true
+SYNC_CUSTOM_FIELDS=true
+```
+
+- Fields render as an **italic green sub-paragraph** under each entry bullet, in `key: value` pairs.
+- Only fields **present on an entry** are shown; entries without `custom_fields` are unchanged (nothing is required on all entries).
+- They appear in **page content only**, never in the visible `Project`/`Duration`/`Date` columns, so invoice/timesheet views stay clean.
+- **Read-only**: the sync reads `custom_fields` and never writes them back to Timing (write-back is the separate enrichment pipeline).
+
 ### ScreenTime Integration
 
 Capture macOS app usage data alongside Timing:

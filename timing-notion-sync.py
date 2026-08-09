@@ -71,6 +71,13 @@ SYNC_ENTRIES = os.environ.get("SYNC_ENTRIES", "false").lower() == "true"
 SYNC_SCREENTIME = os.environ.get("SYNC_SCREENTIME", "false").lower() == "true"
 SCREENTIME_TOP_APPS = int(os.environ.get("SCREENTIME_TOP_APPS", "5"))
 
+# Propagate Timing entry custom_fields (device-scoped enrichment markers) into
+# the Notion page content for each entry. Only effective when SYNC_ENTRIES=true
+# (custom_fields render in the entry-level page content, not the visible
+# Project/Duration/Date columns). Absent fields are simply not shown. Read-only:
+# the sync never writes custom_fields back to Timing.
+SYNC_CUSTOM_FIELDS = os.environ.get("SYNC_CUSTOM_FIELDS", "false").lower() == "true"
+
 # ScreenTime source: "timing" (Timing's own SQLite AppActivity table, FDA-free,
 # works under launchd) or "knowledgec" (Apple's knowledgeC.db, requires Full
 # Disk Access). Defaults to "timing" because knowledgeC.db is FDA-blocked for
@@ -219,6 +226,37 @@ def seconds_to_duration_string(seconds):
     return f"{hours}:{minutes:02d}:{secs:02d}"
 
 
+def _safe_custom_fields(raw: Any) -> Dict[str, str]:
+    """Return a stable dict of string custom_fields from a Timing entry.
+
+    Timing custom_fields are string key/value pairs. Values are coerced to str
+    defensively; any non-string value is skipped.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for k, v in raw.items():
+        if isinstance(v, str):
+            out[str(k)] = v
+    return out
+
+
+def _custom_fields_summary(custom_fields: Dict[str, str], limit: int = 2000) -> str:
+    """Render custom_fields into a single readable string.
+
+    Device-scoped enrichment keys (e.g. ``dayflow_flexmbp``) are kept as
+    ``key: value`` pairs separated by " | ". Truncated at ``limit`` chars so
+    long enrichment payloads don't blow up a Notion rich_text property.
+    """
+    if not custom_fields:
+        return ""
+    parts = [f"{k}: {v}" for k, v in custom_fields.items()]
+    text = " | ".join(parts)
+    if len(text) > limit:
+        text = text[: limit - 3] + "..."
+    return text
+
+
 # =============================================================================
 # TIMING API - Enhanced with Entry-Level Data
 # =============================================================================
@@ -309,6 +347,7 @@ def process_timing_entries(entries: List[Dict]) -> Dict[str, Any]:
             "project_name": project_name,
             "project_path": project_path,
             "is_running": entry.get("is_running", False),
+            "custom_fields": _safe_custom_fields(entry.get("custom_fields")),
         }
         entry_details.append(entry_detail)
 
@@ -812,6 +851,30 @@ def update_page_content_with_entries(
                     },
                 }
             ]
+
+        # Propagate device-scoped custom_fields (enrichment markers) into the
+        # page content when enabled. Only present fields are shown; absent
+        # custom_fields simply yield no sub-block. Kept out of the visible
+        # Project/Duration/Date columns so timesheet views stay clean.
+        if SYNC_CUSTOM_FIELDS:
+            cf_summary = _custom_fields_summary(entry.get("custom_fields") or {})
+            if cf_summary:
+                cf_block = {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [
+                            {
+                                "type": "text",
+                                "text": {"content": cf_summary},
+                                "annotations": {"italic": True, "color": "green"},
+                            }
+                        ]
+                    },
+                }
+                children_key = "bulleted_list_item"
+                children_list = bullet_block[children_key].setdefault("children", [])
+                children_list.append(cf_block)
 
         children.append(bullet_block)
 
