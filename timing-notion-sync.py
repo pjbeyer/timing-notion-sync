@@ -29,6 +29,16 @@ TIMING_API_TOKEN = os.environ.get("TIMING_API_TOKEN")
 NOTION_API_TOKEN = os.environ.get("NOTION_API_TOKEN")
 NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID")
 
+# Multi-database routing: map a Timing project root/folder to a Notion
+# database ID. Project folder -> database ID; any project not matched falls
+# back to NOTION_DATABASE_ID. Example:
+#   PROJECT_DB_MAP='{"Family": "<family_db_id>", "Work": "<work_db_id>"}'
+try:
+    PROJECT_DB_MAP = json.loads(os.environ.get("PROJECT_DB_MAP", "{}") or "{}")
+except (ValueError, TypeError):
+    print("Invalid PROJECT_DB_MAP JSON; ignoring multi-database routing")
+    PROJECT_DB_MAP = {}
+
 # Enhanced sync configuration
 SYNC_ENTRIES = os.environ.get("SYNC_ENTRIES", "false").lower() == "true"
 SYNC_SCREENTIME = os.environ.get("SYNC_SCREENTIME", "false").lower() == "true"
@@ -113,6 +123,19 @@ def get_local_timezone_offset():
     """Get local timezone offset in ISO 8601 format (e.g., '-05:00' for EST)"""
     offset = datetime.now().astimezone().strftime("%z")
     return f"{offset[:3]}:{offset[3:]}"
+
+
+def resolve_database_id(project_path: str) -> str:
+    """Return the Notion database ID for a project path.
+
+    Multi-database routing: the top-level folder (first segment of the
+    hierarchy path) is looked up in PROJECT_DB_MAP; if found, its database is
+    used. Otherwise the default NOTION_DATABASE_ID applies.
+    """
+    if not project_path:
+        return NOTION_DATABASE_ID
+    root = project_path.split(" > ")[0].strip()
+    return PROJECT_DB_MAP.get(root, NOTION_DATABASE_ID)
 
 
 def seconds_to_duration_string(seconds):
@@ -371,9 +394,14 @@ def _bundle_to_app_name(bundle_id: str) -> str:
 # =============================================================================
 
 
-def find_notion_page(date: str, project: str) -> Optional[str]:
-    """Find existing Notion page with matching date and project"""
-    url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
+def find_notion_page(date: str, project: str, database_id: Optional[str] = None) -> Optional[str]:
+    """Find existing Notion page with matching date and project.
+
+    Args:
+        database_id: Target Notion database. Defaults to NOTION_DATABASE_ID.
+    """
+    db_id = database_id or NOTION_DATABASE_ID
+    url = f"https://api.notion.com/v1/databases/{db_id}/query"
     headers = {
         "Authorization": f"Bearer {NOTION_API_TOKEN}",
         "Notion-Version": "2022-06-28",
@@ -408,12 +436,17 @@ def update_or_create_notion_page(
     entry_count: int = 0,
     top_entries: Optional[List[str]] = None,
     screentime_data: Optional[Dict] = None,
+    database_id: Optional[str] = None,
 ) -> Optional[str]:
     """
     Update existing page or create new one in Notion.
 
     Enhanced with optional entry details and ScreenTime data.
+
+    Args:
+        database_id: Target Notion database. Defaults to NOTION_DATABASE_ID.
     """
+    db_id = database_id or NOTION_DATABASE_ID
     headers = {
         "Authorization": f"Bearer {NOTION_API_TOKEN}",
         "Notion-Version": "2022-06-28",
@@ -467,7 +500,7 @@ def update_or_create_notion_page(
     else:
         # Create new page
         url = "https://api.notion.com/v1/pages"
-        data = {"parent": {"database_id": NOTION_DATABASE_ID}, "properties": properties}
+        data = {"parent": {"database_id": db_id}, "properties": properties}
         method = "POST"
 
     response = None
@@ -484,7 +517,9 @@ def update_or_create_notion_page(
             response_json = response.json()
             if "validation_error" in str(response_json):
                 print("Note: Some enhanced properties not available in Notion database")
-                return _sync_basic_properties(page_id, date, duration_seconds, project)
+                return _sync_basic_properties(
+                    page_id, date, duration_seconds, project, database_id=db_id
+                )
         handle_error(error_msg)
         raise
 
@@ -587,8 +622,10 @@ def _sync_basic_properties(
     date: str,
     duration_seconds: float,
     project: str,
+    database_id: Optional[str] = None,
 ) -> Optional[str]:
     """Fallback to basic properties only (backward compatible)."""
+    db_id = database_id or NOTION_DATABASE_ID
     headers = {
         "Authorization": f"Bearer {NOTION_API_TOKEN}",
         "Notion-Version": "2022-06-28",
@@ -618,7 +655,7 @@ def _sync_basic_properties(
         method = "PATCH"
     else:
         url = "https://api.notion.com/v1/pages"
-        data = {"parent": {"database_id": NOTION_DATABASE_ID}, "properties": properties}
+        data = {"parent": {"database_id": db_id}, "properties": properties}
         method = "POST"
 
     response = requests.request(method, url, headers=headers, json=data, timeout=30)
@@ -717,8 +754,12 @@ def main():
                 f"  {project_path}: {seconds_to_duration_string(total_duration)} ({entry_count} entries)"
             )
 
+            # Multi-database routing: resolve the target Notion database for
+            # this project's top-level folder. Falls back to NOTION_DATABASE_ID.
+            db_id = resolve_database_id(project_path)
+
             try:
-                existing_page_id = find_notion_page(today, project_path)
+                existing_page_id = find_notion_page(today, project_path, database_id=db_id)
 
                 result_page_id = update_or_create_notion_page(
                     page_id=existing_page_id,
@@ -728,6 +769,7 @@ def main():
                     entry_count=entry_count,
                     top_entries=top_entries if SYNC_ENTRIES else None,
                     screentime_data=screentime_data,
+                    database_id=db_id,
                 )
 
                 if SYNC_ENTRIES and result_page_id:

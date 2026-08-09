@@ -178,6 +178,24 @@ The sync automatically:
 - Sums durations for each project per day
 - Updates existing entries or creates new ones
 
+### Multi-Database Routing (Optional)
+
+Sync different Timing project roots/folders to **different Notion databases**:
+
+```bash
+# In .env
+PROJECT_DB_MAP={"Work":"<work_db_id>","Family":"<family_db_id>","Consulting":"<consulting_db_id>"}
+```
+
+The top-level folder of each project's hierarchy path is used as the routing key:
+- `Work > Client A > Project X` → `Work` → the Work database
+- `Family > Groceries` → `Family` → the Family database
+- Any project whose root isn't in the map falls back to `NOTION_DATABASE_ID`
+
+Each target database should have the same base schema (`Project`, `Date`, `Duration`, `Hours`, `Last Sync`) plus any enhanced properties you enable. Idempotency is scoped per `(database, date, project)`, so the same project always lands in one database and re-runs update rather than duplicate.
+
+If `PROJECT_DB_MAP` is unset or not valid JSON, all projects use `NOTION_DATABASE_ID` (backward compatible).
+
 ## 📊 Usage
 
 ### Check sync status
