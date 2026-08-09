@@ -118,25 +118,42 @@ SYNC_ENTRIES=true
 
 ### ScreenTime Integration
 
-Capture macOS ScreenTime app usage data:
+Capture macOS app usage data alongside Timing:
 
 ```bash
-# In .env file
+# In .env
 SYNC_SCREENTIME=true
-SCREENTIME_TOP_APPS=5  # Number of top apps to include
+SCREENTIME_SOURCE=timing  # "timing" (default, FDA-free) or "knowledgec"
+SCREENTIME_TOP_APPS=5     # Number of top apps to include
 ```
 
+**Data source (`SCREENTIME_SOURCE`):**
+
+- `timing` (default): reads Timing.app's own SQLite `AppActivity` table
+  (`~/Library/Application Support/info.eurocomp.Timing2/SQLite.db`). This is
+  **FDA-free** — it works under launchd/cron without Full Disk Access — and
+  adds per-`localDeviceID` scoping so only this Mac's usage is reported.
+- `knowledgec`: reads Apple's `knowledgeC.db`. This **requires Full Disk
+  Access** and is blocked for launchd/cron processes (TCC grants per
+  executable); prefer `timing`.
+
 **Required Notion properties:**
-- `Active Hours` (Number) - Total active screen time
-- `Screen Events` (Number) - Number of app usage events
-- `Top Apps` (Text) - Summary of most-used apps
+| Property | Type | Description |
+|----------|------|-------------|
+| Active Hours | Number | Total active screen time |
+| Screen Events | Number | Number of app usage events |
+| Top Apps | Text | Summary of most-used apps |
 
-**Setup Requirements:**
-1. Grant **Full Disk Access** to your terminal app or launchd agent
-2. System Settings → Privacy & Security → Full Disk Access
-3. Add Terminal.app (or iTerm, etc.)
+If the source is unavailable (e.g. DB not found), ScreenTime sync is skipped gracefully.
 
-If Full Disk Access is not granted, ScreenTime sync will be skipped gracefully.
+### Idle Handling
+
+The sync skips when the system has been idle longer than `IDLE_THRESHOLD_SECONDS` (default 300s / 5 minutes), so a manual run while idle won't duplicate work. To sync regardless of idle state (e.g. so a launchd sync updates Notion even when the machine is idle):
+
+```bash
+# In .env
+SYNC_WHEN_IDLE=true
+```
 
 ### Notion Database Schema
 

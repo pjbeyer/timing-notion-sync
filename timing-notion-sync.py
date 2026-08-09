@@ -71,8 +71,21 @@ SYNC_ENTRIES = os.environ.get("SYNC_ENTRIES", "false").lower() == "true"
 SYNC_SCREENTIME = os.environ.get("SYNC_SCREENTIME", "false").lower() == "true"
 SCREENTIME_TOP_APPS = int(os.environ.get("SCREENTIME_TOP_APPS", "5"))
 
-# ScreenTime database location
+# ScreenTime source: "timing" (Timing's own SQLite AppActivity table, FDA-free,
+# works under launchd) or "knowledgec" (Apple's knowledgeC.db, requires Full
+# Disk Access). Defaults to "timing" because knowledgeC.db is FDA-blocked for
+# launchd/cron processes.
+SCREENTIME_SOURCE = os.environ.get("SCREENTIME_SOURCE", "timing").lower()
+
+# ScreenTime database locations
 SCREENTIME_DB = Path.home() / "Library/Application Support/Knowledge/knowledgeC.db"
+TIMING_SQLITE_DB = Path.home() / "Library/Application Support/info.eurocomp.Timing2/SQLite.db"
+
+# Idle handling: when SYNC_WHEN_IDLE is true, the sync runs even if the system
+# has been idle for more than the idle threshold. Defaults to false (skip when
+# idle), matching the existing behaviour.
+SYNC_WHEN_IDLE = os.environ.get("SYNC_WHEN_IDLE", "false").lower() == "true"
+IDLE_THRESHOLD_SECONDS = int(os.environ.get("IDLE_THRESHOLD_SECONDS", "300"))
 
 # Error logging configuration
 LOG_DIR = Path(__file__).parent / "logs"
@@ -324,17 +337,23 @@ def process_timing_entries(entries: List[Dict]) -> Dict[str, Any]:
 
 
 def get_screentime_data(date: str) -> Optional[Dict[str, Any]]:
-    """
-    Query macOS ScreenTime database for app usage data.
+    """Query app-usage data for the given date.
 
-    Requires Full Disk Access permission for the running process.
-
-    Args:
-        date: Date in YYYY-MM-DD format
+    Source is selected by SCREENTIME_SOURCE:
+    - "timing": Timing.app's own SQLite AppActivity table (FDA-free, works
+      under launchd/cron).
+    - "knowledgec": Apple's knowledgeC.db (requires Full Disk Access).
 
     Returns:
-        Dict with app usage data, or None if unavailable
+        Dict with app usage data, or None if unavailable.
     """
+    if SCREENTIME_SOURCE == "timing":
+        return _get_screentime_appactivity(date)
+    return _get_screentime_knowledgec(date)
+
+
+def _get_screentime_knowledgec(date: str) -> Optional[Dict[str, Any]]:
+    """Query Apple's knowledgeC.db (requires Full Disk Access)."""
     if not SCREENTIME_DB.exists():
         print(f"ScreenTime database not found at {SCREENTIME_DB}")
         return None
@@ -411,6 +430,116 @@ def get_screentime_data(date: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         print(f"Failed to query ScreenTime: {e}")
         return None
+
+
+def _get_screentime_appactivity(date: str) -> Optional[Dict[str, Any]]:
+    """Query Timing.app's SQLite AppActivity table for app-usage data.
+
+    FDA-free alternative to knowledgeC.db: Timing.app's own local database
+    (~/Library/Application Support/info.eurocomp.Timing2/SQLite.db) records
+    per-app activity (AppActivity) with project attribution and per-device
+    scoping, and is readable by unattended processes (launchd/cron) without
+    Full Disk Access.
+
+    Args:
+        date: Date in YYYY-MM-DD format.
+
+    Returns:
+        Dict with app usage data, or None if unavailable.
+    """
+    if not TIMING_SQLITE_DB.exists():
+        print(f"Timing SQLite database not found at {TIMING_SQLITE_DB}")
+        return None
+
+    # Local device scoping: AppActivity rows carry localDeviceID; find this
+    # Mac's device and restrict to it so we see this device's usage only.
+    # Falls back to all devices if the device map can't be read.
+    try:
+        conn = sqlite3.connect(f"file:{TIMING_SQLITE_DB}?mode=ro", uri=True)
+        cursor = conn.cursor()
+
+        local_device_id = _resolve_local_device_id(cursor)
+
+        # AppActivity stores startDate/endDate as Unix epoch seconds.
+        # Filter to the requested local date and (optionally) this device.
+        query = """
+        SELECT ap.title AS app_title,
+               ROUND(SUM(a.endDate - a.startDate), 0) AS secs
+        FROM AppActivity a
+        JOIN Application ap ON a.applicationID = ap.id
+        LEFT JOIN Project p ON a.projectID = p.id
+        WHERE a.isDeleted = 0
+          AND date(a.endDate, 'unixepoch', 'localtime') = ?
+        """
+        params: List[Any] = [date]
+        if local_device_id:
+            query += " AND a.localDeviceID = ?"
+            params.append(local_device_id)
+        query += """
+        GROUP BY ap.title
+        ORDER BY secs DESC;
+        """
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception as e:
+        print(f"Failed to query Timing AppActivity: {e}")
+        return None
+
+    total_events = 0
+    total_seconds = 0
+    apps = []
+    for app_title, secs in rows:
+        secs = int(secs or 0)
+        if secs <= 0:
+            continue
+        minutes = round(secs / 60.0, 1)
+        hours = round(secs / 3600.0, 2)
+        total_events += 1
+        total_seconds += secs
+        apps.append(
+            {
+                "bundle_id": app_title or "unknown",
+                "app_name": _bundle_to_app_name(app_title),
+                "event_count": 1,
+                "duration_minutes": minutes,
+                "duration_hours": hours,
+            }
+        )
+
+    top_apps = apps[:SCREENTIME_TOP_APPS]
+    top_apps_summary = ", ".join(
+        f"{app['app_name']} ({app['duration_hours']}h)" for app in top_apps
+    )
+
+    return {
+        "total_events": total_events,
+        "total_minutes": round(total_seconds / 60.0, 1),
+        "total_hours": round(total_seconds / 3600.0, 2),
+        "app_count": len(apps),
+        "apps": apps,
+        "top_apps": top_apps,
+        "top_apps_summary": top_apps_summary,
+    }
+
+
+def _resolve_local_device_id(cursor) -> Optional[str]:
+    """Return this machine's localDeviceID from Timing's Device table.
+
+    Falls back to None (all devices) if the table or a match can't be found.
+    """
+    try:
+        cursor.execute(
+            "SELECT localID FROM Device WHERE displayName = ?",
+            (Path.home().name,),
+        )
+        row = cursor.fetchone()
+        if row:
+            return str(row[0])
+    except Exception:
+        pass
+    return None
 
 
 def _bundle_to_app_name(bundle_id: str) -> str:
@@ -756,20 +885,25 @@ def main():
     print(f"Starting Timing to Notion sync at {datetime.now()}")
     print(f"Sync modes: entries={SYNC_ENTRIES}, screentime={SYNC_SCREENTIME}")
 
-    # Check if user is idle (5 minutes = 300 seconds)
-    try:
-        idle_time = (
-            int(
-                os.popen("ioreg -c IOHIDSystem | grep HIDIdleTime").read().split("=")[1]
+    # Skip when the system is idle, unless SYNC_WHEN_IDLE is set or idle can't
+    # be determined. Threshold is IDLE_THRESHOLD_SECONDS (default 300).
+    if not SYNC_WHEN_IDLE:
+        try:
+            idle_time = (
+                int(
+                    os.popen("ioreg -c IOHIDSystem | grep HIDIdleTime").read().split("=")[1]
+                )
+                / 1000000000
             )
-            / 1000000000
-        )
-        if idle_time > 300:
-            print(f"Computer idle for {idle_time:.0f} seconds, skipping sync")
-            sys.exit(0)
-    except Exception:
-        # If we can't check idle time, continue with sync
-        pass
+            if idle_time > IDLE_THRESHOLD_SECONDS:
+                print(
+                    f"Computer idle for {idle_time:.0f} seconds, skipping sync "
+                    f"(set SYNC_WHEN_IDLE=true to sync anyway)"
+                )
+                sys.exit(0)
+        except Exception:
+            # If we can't check idle time, continue with sync
+            pass
 
     try:
         today = datetime.now().strftime("%Y-%m-%d")
