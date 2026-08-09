@@ -196,6 +196,22 @@ Each target database should have the same base schema (`Project`, `Date`, `Durat
 
 If `PROJECT_DB_MAP` is unset or not valid JSON, all projects use `NOTION_DATABASE_ID` (backward compatible).
 
+### Multi-Workspace (Optional)
+
+Route project folders to **different Notion workspaces** (e.g. GSD personal vs. Flex/work vs. consulting), each with its own Notion API token:
+
+```bash
+# In .env
+WORKSPACES={"gsd":{"token_env":"NOTION_API_TOKEN","databases":{"Family":"<family_db_id>"}},"flex":{"token_env":"NOTION_API_TOKEN_FLEX","databases":{"Work":"<work_db_id>","Consulting":"<consult_db_id>"}}}
+WORKSPACE_MAP={"Family":"gsd","Work":"flex","Consulting":"flex"}
+```
+
+- `WORKSPACES` is the registry: each entry has a `token_env` (the env var holding that workspace's Notion API token) and a `databases` map from project folder to database ID.
+- `WORKSPACE_MAP` assigns each project **root folder** to a workspace. A folder not listed falls back to the default workspace (`NOTION_API_TOKEN` + `NOTION_DATABASE_ID` / `PROJECT_DB_MAP`).
+- Provide the extra tokens (e.g. `NOTION_API_TOKEN_FLEX`) in `.env` or via `run-sync.sh`/Keychain.
+- **Routing is structural and fail-closed**: the folder→workspace mapping is fixed by config, so a `Family` project can never resolve to the Flex workspace and vice versa. Never set a `token_env` to a credential that should not write that folder's data.
+- Idempotency is scoped per `(workspace, database, date, project)`.
+
 ## 📊 Usage
 
 ### Check sync status

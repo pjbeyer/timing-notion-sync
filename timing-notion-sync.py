@@ -39,6 +39,33 @@ except (ValueError, TypeError):
     print("Invalid PROJECT_DB_MAP JSON; ignoring multi-database routing")
     PROJECT_DB_MAP = {}
 
+# Multi-workspace routing: route project folders to different Notion
+# workspaces. WORKSPACES defines the registry (name -> auth + per-workspace
+# databases); WORKSPACE_MAP maps a project root/folder to a workspace name.
+#
+#   WORKSPACES='{
+#     "gsd":  {"token_env": "NOTION_API_TOKEN",      "databases": {"Family": "family_db_id"}},
+#     "flex": {"token_env": "NOTION_API_TOKEN_FLEX", "databases": {"Work": "work_db_id", "Consulting": "consult_db_id"}}
+#   }'
+#   WORKSPACE_MAP='{"Family": "gsd", "Work": "flex", "Consulting": "flex"}'
+#
+# Each workspace's API token is read from the named env var (which run-sync.sh
+# populates from Keychain/1Password). A project folder that isn't in
+# WORKSPACE_MAP falls back to the default workspace: NOTION_API_TOKEN +
+# NOTION_DATABASE_ID / PROJECT_DB_MAP. Routing is structural: a folder's
+# workspace is fixed by config, so family projects can never land in a work
+# workspace and vice versa.
+def _parse_json_env(name: str, default: Any):
+    try:
+        return json.loads(os.environ.get(name, "{}") or "{}")
+    except (ValueError, TypeError):
+        print(f"Invalid {name} JSON; ignoring")
+        return default
+
+
+WORKSPACES = _parse_json_env("WORKSPACES", {})
+WORKSPACE_MAP = _parse_json_env("WORKSPACE_MAP", {})
+
 # Enhanced sync configuration
 SYNC_ENTRIES = os.environ.get("SYNC_ENTRIES", "false").lower() == "true"
 SYNC_SCREENTIME = os.environ.get("SYNC_SCREENTIME", "false").lower() == "true"
@@ -136,6 +163,39 @@ def resolve_database_id(project_path: str) -> str:
         return NOTION_DATABASE_ID
     root = project_path.split(" > ")[0].strip()
     return PROJECT_DB_MAP.get(root, NOTION_DATABASE_ID)
+
+
+def resolve_workspace(project_path: str) -> Dict[str, Any]:
+    """Resolve the (token, database_id, name) target for a project path.
+
+    Multi-workspace routing: the top-level folder is looked up in
+    WORKSPACE_MAP. If found, the workspace's API token (from its token_env)
+    and per-workspace database map apply. Otherwise the default workspace
+    (NOTION_API_TOKEN + PROJECT_DB_MAP / NOTION_DATABASE_ID) is used.
+
+    Returns a dict with keys ``token``, ``database_id`` and ``name``.
+    """
+    if not project_path:
+        return {
+            "token": NOTION_API_TOKEN,
+            "database_id": NOTION_DATABASE_ID,
+            "name": "default",
+        }
+
+    root = project_path.split(" > ")[0].strip()
+    ws_name = WORKSPACE_MAP.get(root)
+    if ws_name and ws_name in WORKSPACES:
+        ws = WORKSPACES[ws_name]
+        token = os.environ.get(ws.get("token_env", ""), NOTION_API_TOKEN)
+        ws_dbs = ws.get("databases", {})
+        db_id = ws_dbs.get(root, resolve_database_id(project_path))
+        return {"token": token, "database_id": db_id, "name": ws_name}
+
+    return {
+        "token": NOTION_API_TOKEN,
+        "database_id": resolve_database_id(project_path),
+        "name": "default",
+    }
 
 
 def seconds_to_duration_string(seconds):
@@ -394,16 +454,24 @@ def _bundle_to_app_name(bundle_id: str) -> str:
 # =============================================================================
 
 
-def find_notion_page(date: str, project: str, database_id: Optional[str] = None) -> Optional[str]:
+def find_notion_page(
+    date: str,
+    project: str,
+    database_id: Optional[str] = None,
+    token: Optional[str] = None,
+) -> Optional[str]:
     """Find existing Notion page with matching date and project.
 
     Args:
         database_id: Target Notion database. Defaults to NOTION_DATABASE_ID.
+        token: Notion API token for the target workspace. Defaults to
+            NOTION_API_TOKEN (multi-workspace routing).
     """
     db_id = database_id or NOTION_DATABASE_ID
+    auth_token = token or NOTION_API_TOKEN
     url = f"https://api.notion.com/v1/databases/{db_id}/query"
     headers = {
-        "Authorization": f"Bearer {NOTION_API_TOKEN}",
+        "Authorization": f"Bearer {auth_token}",
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json",
     }
@@ -437,6 +505,7 @@ def update_or_create_notion_page(
     top_entries: Optional[List[str]] = None,
     screentime_data: Optional[Dict] = None,
     database_id: Optional[str] = None,
+    token: Optional[str] = None,
 ) -> Optional[str]:
     """
     Update existing page or create new one in Notion.
@@ -445,10 +514,13 @@ def update_or_create_notion_page(
 
     Args:
         database_id: Target Notion database. Defaults to NOTION_DATABASE_ID.
+        token: Notion API token for the target workspace. Defaults to
+            NOTION_API_TOKEN (multi-workspace routing).
     """
     db_id = database_id or NOTION_DATABASE_ID
+    auth_token = token or NOTION_API_TOKEN
     headers = {
-        "Authorization": f"Bearer {NOTION_API_TOKEN}",
+        "Authorization": f"Bearer {auth_token}",
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json",
     }
@@ -518,19 +590,27 @@ def update_or_create_notion_page(
             if "validation_error" in str(response_json):
                 print("Note: Some enhanced properties not available in Notion database")
                 return _sync_basic_properties(
-                    page_id, date, duration_seconds, project, database_id=db_id
+                    page_id,
+                    date,
+                    duration_seconds,
+                    project,
+                    database_id=db_id,
+                    token=auth_token,
                 )
         handle_error(error_msg)
         raise
 
 
-def update_page_content_with_entries(page_id: str, entries: List[Dict]) -> bool:
+def update_page_content_with_entries(
+    page_id: str, entries: List[Dict], token: Optional[str] = None
+) -> bool:
     """Replace page content with formatted entry details as bullet list blocks."""
     if not entries:
         return True
 
+    auth_token = token or NOTION_API_TOKEN
     headers = {
-        "Authorization": f"Bearer {NOTION_API_TOKEN}",
+        "Authorization": f"Bearer {auth_token}",
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json",
     }
@@ -623,11 +703,13 @@ def _sync_basic_properties(
     duration_seconds: float,
     project: str,
     database_id: Optional[str] = None,
+    token: Optional[str] = None,
 ) -> Optional[str]:
     """Fallback to basic properties only (backward compatible)."""
     db_id = database_id or NOTION_DATABASE_ID
+    auth_token = token or NOTION_API_TOKEN
     headers = {
-        "Authorization": f"Bearer {NOTION_API_TOKEN}",
+        "Authorization": f"Bearer {auth_token}",
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json",
     }
@@ -754,12 +836,18 @@ def main():
                 f"  {project_path}: {seconds_to_duration_string(total_duration)} ({entry_count} entries)"
             )
 
-            # Multi-database routing: resolve the target Notion database for
-            # this project's top-level folder. Falls back to NOTION_DATABASE_ID.
-            db_id = resolve_database_id(project_path)
+            # Multi-database / multi-workspace routing: resolve the target
+            # Notion workspace (token) and database for this project's
+            # top-level folder. Defaults preserve existing behaviour.
+            ws = resolve_workspace(project_path)
+            ws_token = ws["token"]
+            db_id = ws["database_id"]
+            ws_name = ws["name"]
 
             try:
-                existing_page_id = find_notion_page(today, project_path, database_id=db_id)
+                existing_page_id = find_notion_page(
+                    today, project_path, database_id=db_id, token=ws_token
+                )
 
                 result_page_id = update_or_create_notion_page(
                     page_id=existing_page_id,
@@ -770,11 +858,12 @@ def main():
                     top_entries=top_entries if SYNC_ENTRIES else None,
                     screentime_data=screentime_data,
                     database_id=db_id,
+                    token=ws_token,
                 )
 
                 if SYNC_ENTRIES and result_page_id:
                     update_page_content_with_entries(
-                        result_page_id, project_info["entries"]
+                        result_page_id, project_info["entries"], token=ws_token
                     )
 
                 if existing_page_id:
