@@ -945,6 +945,14 @@ def _sync_basic_properties(
 
 def main():
     """Main sync function with enhanced data collection"""
+    # Optional --date YYYY-MM-DD override (backfill support). Defaults to today.
+    target_date = None
+    if "--date" in sys.argv:
+        try:
+            target_date = sys.argv[sys.argv.index("--date") + 1]
+            datetime.strptime(target_date, "%Y-%m-%d")  # validate format
+        except (IndexError, ValueError):
+            sys.exit("ERROR: --date requires a YYYY-MM-DD value, e.g. --date 2026-10-27")
     print(f"Starting Timing to Notion sync at {datetime.now()}")
     print(f"Sync modes: entries={SYNC_ENTRIES}, screentime={SYNC_SCREENTIME}")
 
@@ -969,7 +977,7 @@ def main():
             pass
 
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = target_date or datetime.now().strftime("%Y-%m-%d")
         tz_offset = get_local_timezone_offset()
         print(f"Fetching data for {today} ({tz_offset})")
 

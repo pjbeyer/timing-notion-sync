@@ -46,4 +46,4 @@ if [ -z "$TIMING_API_TOKEN" ] || [ -z "$NOTION_API_TOKEN" ] || [ -z "$NOTION_DAT
     exit 1
 fi
 
-exec "$PYTHON" "$SCRIPT_DIR/timing-notion-sync.py"
+exec "$PYTHON" "$SCRIPT_DIR/timing-notion-sync.py" "$@"
