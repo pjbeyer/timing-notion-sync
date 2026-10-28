@@ -1,0 +1,24 @@
+.gitignore
+  s_3172106db82304::t_bd6fe55780a5a2 4
+  s_3172106db82304::t_c16fecb57a5dfa 5
+  s_3172106db82304::t_4abc61cb6a9883 10-18
+run-sync.sh
+  s_3172106db82304::t_8be095ea1f4957 8-15
+  s_3172106db82304::t_05adaa5a50a4a7 49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.7.6",
+  "base_commit_sha": "c49611e65d0d560beb90ebcebae2617cdccc7a64",
+  "prompts": {},
+  "sessions": {
+    "s_3172106db82304": {
+      "agent_id": {
+        "tool": "hermes",
+        "id": "20261024_074814_ab822451",
+        "model": "glm-5.3-flash --litellm-local"
+      },
+      "human_author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
