@@ -1,0 +1,22 @@
+timing-notion-sync.py
+  s_3172106db82304::t_5e98c9a93ddacc 948-955
+  s_3172106db82304::t_73babc69a74c1c 980
+run-sync.sh
+  s_3172106db82304::t_1002a7dced7f71 49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.7.6",
+  "base_commit_sha": "cf01e314be33972adb46edc5f5f8b8fc5e1400fc",
+  "prompts": {},
+  "sessions": {
+    "s_3172106db82304": {
+      "agent_id": {
+        "tool": "hermes",
+        "id": "20261024_074814_ab822451",
+        "model": "glm-5.3-flash --litellm-local"
+      },
+      "human_author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
