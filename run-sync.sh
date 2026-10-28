@@ -5,7 +5,14 @@
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-export PYTHONPATH="$HOME/.local/lib/python/site-packages:${PYTHONPATH:-}"
+
+# Prefer a repo venv if present (survives Homebrew python upgrades); else system python.
+if [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+    PYTHON="$SCRIPT_DIR/.venv/bin/python"
+else
+    PYTHON="python3"
+fi
+export PYTHON
 
 cd "$SCRIPT_DIR"
 
@@ -39,4 +46,4 @@ if [ -z "$TIMING_API_TOKEN" ] || [ -z "$NOTION_API_TOKEN" ] || [ -z "$NOTION_DAT
     exit 1
 fi
 
-exec python3 "$SCRIPT_DIR/timing-notion-sync.py"
+exec "$PYTHON" "$SCRIPT_DIR/timing-notion-sync.py"

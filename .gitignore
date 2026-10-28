@@ -1,8 +1,18 @@
 .env
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
 .DS_Store
 logs/
 *.log
 com.timing-notion-sync.plist
 promps/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
+
+# Beads / Dolt files (added by bd init)
+.beads-credential-key
+.beads/proxieddb/
